@@ -12,6 +12,9 @@ export function initialState(seed: string): GameState {
     turnSeconds: 0,
     timer: null,
     handSizes: [],
+    roundIndex: 0,
+    leadIndex: 0,
+    scores: {},
   };
 }
 

@@ -4,11 +4,8 @@ import { fullDeck, shuffle, suitOf, rankIndex, type Card } from "./cards";
 
 // ---- Helpers ---------------------------------------------------------------
 
-function rotateTurn(state: GameState): GameState {
-  if (!state.turn || state.players.length === 0) return state;
-  const idx = Math.max(0, state.players.findIndex(p => p.id === state.turn));
-  const next = state.players[(idx + 1) % state.players.length]?.id ?? state.players[0].id;
-  return { ...state, turn: next, timer: state.turnSeconds };
+function currentHandSize(state: GameState): number {
+  return state.handSizes[state.roundIndex] ?? 0;
 }
 
 function nextAfter(playerId: string, players: { id: string }[]): string {
@@ -16,17 +13,18 @@ function nextAfter(playerId: string, players: { id: string }[]): string {
   return players[(idx + 1) % players.length].id;
 }
 
-function currentHandSize(state: GameState): number {
-  return state.handSizes[0] ?? 0;
+function rotateTurn(state: GameState): GameState {
+  if (!state.turn || state.players.length === 0) return state;
+  const next = nextAfter(state.turn, state.players);
+  return { ...state, turn: next, timer: state.turnSeconds };
 }
 
 function deal(state: GameState): GameState {
   const n = currentHandSize(state);
-  const players = state.players;
   const deck = shuffle(fullDeck(), state.rngSeed);
   const hands: Record<string, Card[]> = {};
   let pos = 0;
-  for (const p of players) {
+  for (const p of state.players) {
     hands[p.id] = deck.slice(pos, pos + n);
     pos += n;
   }
@@ -35,7 +33,18 @@ function deal(state: GameState): GameState {
     deck,
     hands,
     trick: undefined,
-    tableWins: Object.fromEntries(players.map(p => [p.id, 0])),
+    tableWins: Object.fromEntries(state.players.map(p => [p.id, 0])),
+  };
+}
+
+function startHand(state: GameState): GameState {
+  const dealt = deal(state);
+  const leader = dealt.players[dealt.leadIndex]?.id ?? dealt.players[0]?.id ?? null;
+  return {
+    ...dealt,
+    phase: "Trick",
+    timer: dealt.turnSeconds,
+    turn: leader,
   };
 }
 
@@ -78,7 +87,6 @@ function playCard(state: GameState, playerId: string, card: Card): GameState {
     const winner = pickTrickWinner(plays);
     const tableWins = { ...(state.tableWins ?? {}) };
     tableWins[winner] = (tableWins[winner] ?? 0) + 1;
-    const nextTurn = winner;
 
     // any cards left in any hand?
     const anyLeft = Object.values(hands).some(h => h.length > 0);
@@ -89,18 +97,19 @@ function playCard(state: GameState, playerId: string, card: Card): GameState {
         hands,
         trick: undefined,
         tableWins,
-        turn: nextTurn,
+        turn: winner, // last-trick winner (info only)
         phase: "Scoring",
         timer: null,
       };
     }
 
+    // winner leads next trick
     return {
       ...state,
       hands,
       trick: undefined,
       tableWins,
-      turn: nextTurn,
+      turn: winner,
       timer: state.turnSeconds,
     };
   }
@@ -128,19 +137,15 @@ export function step(state: GameState, cmd: Command): GameState {
 
     case "START_GAME": {
       if (state.phase !== "Lobby" || state.players.length < 2) return state;
-      // IMPORTANT: set config BEFORE dealing so currentHandSize() is correct
       const seeded: GameState = {
         ...state,
         handSizes: cmd.handSizes,
         turnSeconds: cmd.turnSeconds,
+        roundIndex: 0,
+        leadIndex: 0,
+        scores: Object.fromEntries(state.players.map(p => [p.id, 0])),
       };
-      const dealt = deal(seeded);
-      return {
-        ...dealt,
-        phase: "Trick",
-        timer: cmd.turnSeconds,
-        turn: dealt.players[0]?.id ?? null, // first player leads
-      };
+      return startHand(seeded);
     }
 
     case "PLAY_CARD": {
@@ -157,6 +162,40 @@ export function step(state: GameState, cmd: Command): GameState {
 
     case "NEXT_TURN": {
       return rotateTurn(state);
+    }
+
+    case "NEXT_HAND": {
+      if (state.phase !== "Scoring") return state;
+
+      // add this hand's wins into cumulative scores
+      const scores = { ...state.scores };
+      for (const pid of Object.keys(state.tableWins ?? {})) {
+        scores[pid] = (scores[pid] ?? 0) + (state.tableWins?.[pid] ?? 0);
+      }
+
+      const nextRound = state.roundIndex + 1;
+      if (nextRound >= state.handSizes.length) {
+        // all hands done
+        return {
+          ...state,
+          scores,
+          phase: "RoundEnd",
+          timer: null,
+          hands: undefined,
+          trick: undefined,
+          tableWins: undefined,
+        };
+      }
+
+      // advance hand: rotate leader, increment roundIndex, deal next
+      const leadIndex = (state.leadIndex + 1) % state.players.length;
+      const progressed: GameState = {
+        ...state,
+        scores,
+        roundIndex: nextRound,
+        leadIndex,
+      };
+      return startHand(progressed);
     }
 
     default:
