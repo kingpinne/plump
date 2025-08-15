@@ -8,9 +8,9 @@ import {
   ScrollView,
   StyleSheet,
   Platform,
+  Switch,
 } from "react-native";
 
-// Adjust this import if your structure differs.
 import {
   initialState as coreInitialState,
   applyCommand as coreApplyCommand,
@@ -48,6 +48,7 @@ export default function App() {
   const [state, setState] = useState<CoreGameState | null>(null);
   const [rawInit, setRawInit] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+  const [autoTick, setAutoTick] = useState(true);
 
   const initialState = useMemo(() => coreInitialState, []);
   const applyCommand = useMemo(() => coreApplyCommand, []);
@@ -67,6 +68,17 @@ export default function App() {
   useEffect(() => {
     boot();
   }, []);
+
+  // Auto-tick every second while in Trick
+  useEffect(() => {
+    if (!state || state.phase !== "Trick" || !autoTick) return;
+    const id = setInterval(() => {
+      const result = applyCommand(state, { type: "TICK" } as any);
+      const next = "state" in (result || {}) ? (result as any).state : normalizeState<CoreGameState>(result);
+      setState(next);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [state?.phase, state?.timer, autoTick]); // re-arm when timer changes or toggle flips
 
   const run = (cmd: any) => {
     if (!state) return;
@@ -88,7 +100,6 @@ export default function App() {
     const hand = state.hands?.[state.turn];
     if (!hand || hand.length === 0) return;
 
-    // try to follow suit if trick exists
     const trick = state.trick;
     let card = hand[0];
     if (trick?.plays?.length) {
@@ -185,8 +196,11 @@ export default function App() {
         </View>
 
         <View style={styles.box}>
-          <Text style={styles.h2}>Raw initialState() output</Text>
-          <Text style={styles.code}>{JSON.stringify(rawInit, null, 2)}</Text>
+          <Text style={styles.h2}>Settings</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text>Auto tick</Text>
+            <Switch value={autoTick} onValueChange={setAutoTick} />
+          </View>
         </View>
 
         <View style={styles.row}>

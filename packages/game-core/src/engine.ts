@@ -68,6 +68,40 @@ function pickTrickWinner(plays: { playerId: string; card: Card }[]): string {
   return best.playerId;
 }
 
+// --- Auto-play (lowest legal card) -----------------------------------------
+function chooseAutoCard(state: GameState, playerId: string): Card | null {
+  const hand = state.hands?.[playerId] ?? [];
+  if (hand.length === 0) return null;
+
+  const plays = state.trick?.plays ?? [];
+  const leadSuit = plays.length ? suitOf(plays[0].card) : null;
+
+  // collect legal cards
+  const legal = hand.filter(c => legalToPlay(state, playerId, c));
+  if (legal.length === 0) return null;
+
+  // prefer following suit if possible, pick the *lowest* rank (largest index)
+  const pool = leadSuit ? legal.filter(c => suitOf(c) === leadSuit) : legal;
+  const list = pool.length ? pool : legal;
+
+  let worst = list[0];
+  for (let i = 1; i < list.length; i++) {
+    if (rankIndex(list[i]) > rankIndex(worst)) worst = list[i]; // larger index = lower rank
+  }
+  return worst;
+}
+
+function autoPlay(state: GameState): GameState {
+  if (!state.turn) return state;
+  const card = chooseAutoCard(state, state.turn);
+  if (!card) {
+    // should not happen; fallback to rotate
+    return rotateTurn(state);
+  }
+  return playCard(state, state.turn, card);
+}
+
+// --- Core play --------------------------------------------------------------
 function playCard(state: GameState, playerId: string, card: Card): GameState {
   if (state.phase !== "Trick" || !state.hands) return state;
   if (state.turn !== playerId) return state;
@@ -156,8 +190,8 @@ export function step(state: GameState, cmd: Command): GameState {
       if (state.phase !== "Trick") return state;
       const t = (state.timer ?? 0) - 1;
       if (t > 0) return { ...state, timer: t };
-      // timeout → for now, just rotate (placeholder for auto-play)
-      return rotateTurn(state);
+      // timer expired → auto-play for the current player
+      return autoPlay(state);
     }
 
     case "NEXT_TURN": {
