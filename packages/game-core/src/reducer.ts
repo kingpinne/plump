@@ -15,6 +15,8 @@ export function initialState(seed: string): GameState {
     roundIndex: 0,
     leadIndex: 0,
     scores: {},
+    bids: {},
+    trump: "NT",
   };
 }
 

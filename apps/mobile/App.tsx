@@ -16,7 +16,6 @@ import {
   applyCommand as coreApplyCommand,
 } from "../../packages/game-core/src/reducer";
 
-// Minimal shape so TS is happy regardless of your exported types
 type CoreGameState = {
   version: number;
   phase?: string;
@@ -29,13 +28,14 @@ type CoreGameState = {
   roundIndex?: number;
   leadIndex?: number;
   scores?: Record<string, number>;
+  bids?: Record<string, number | undefined>;
+  trump?: string;
   deck?: string[];
   hands?: Record<string, string[]>;
   trick?: { leader: string; plays: { playerId: string; card: string }[] };
   tableWins?: Record<string, number>;
 };
 
-// Unwrap either a plain state or a { state } wrapper
 function normalizeState<T extends object>(maybe: any): T {
   if (maybe && typeof maybe === "object") {
     if ("state" in maybe && maybe.state) return maybe.state as T;
@@ -65,11 +65,9 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    boot();
-  }, []);
+  useEffect(() => { boot(); }, []);
 
-  // Auto-tick every second while in Trick
+  // Auto-tick during Trick
   useEffect(() => {
     if (!state || state.phase !== "Trick" || !autoTick) return;
     const id = setInterval(() => {
@@ -78,7 +76,7 @@ export default function App() {
       setState(next);
     }, 1000);
     return () => clearInterval(id);
-  }, [state?.phase, state?.timer, autoTick]); // re-arm when timer changes or toggle flips
+  }, [state?.phase, state?.timer, autoTick]);
 
   const run = (cmd: any) => {
     if (!state) return;
@@ -87,13 +85,19 @@ export default function App() {
     setState(next);
   };
 
-  // --- Handlers ---
+  // Handlers
   const onAddPlayer = () => run({ type: "ADD_PLAYER", playerId: "you" });
   const onAddBot = () => run({ type: "ADD_PLAYER", playerId: "bot" });
   const onStartGame = () => run({ type: "START_GAME", handSizes: [5, 4, 3], turnSeconds: 10 });
   const onNextTurn = () => run({ type: "NEXT_TURN" });
   const onNextHand = () => run({ type: "NEXT_HAND" });
   const onTick = () => run({ type: "TICK" });
+
+  const onBid = (amount: number) => {
+    if (!state || !state.turn) return;
+    run({ type: "PLACE_BID", playerId: state.turn, bid: amount });
+  };
+  const setTrump = (t: string) => run({ type: "SET_TRUMP", trump: t });
 
   const playFirstLegal = () => {
     if (!state || !state.turn) return;
@@ -116,7 +120,6 @@ export default function App() {
     return state.handSizes[idx] ?? 0;
   };
 
-  // --- UI ---
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
@@ -146,11 +149,16 @@ export default function App() {
               <Text>timer: {String(state.timer)}</Text>
               <Text>turnSeconds: {String(state.turnSeconds)}</Text>
               <Text>handSizes: {String(state.handSizes ?? [])}</Text>
+              <Text>trump: {String(state.trump)}</Text>
 
-              <Text style={{ marginTop: 6 }}>players ({state.players?.length ?? 0}):</Text>
-              {(state.players ?? []).map((p, i) => (
-                <Text key={i}>• {p.id}</Text>
-              ))}
+              {!!state.bids && (
+                <>
+                  <Text style={{ marginTop: 6 }}>bids:</Text>
+                  {state.players.map(p => (
+                    <Text key={p.id}>• {p.id}: {state.bids?.[p.id] ?? "—"}</Text>
+                  ))}
+                </>
+              )}
 
               {state.scores && Object.keys(state.scores).length > 0 && (
                 <>
@@ -195,6 +203,7 @@ export default function App() {
           )}
         </View>
 
+        {/* Settings */}
         <View style={styles.box}>
           <Text style={styles.h2}>Settings</Text>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -203,6 +212,7 @@ export default function App() {
           </View>
         </View>
 
+        {/* Actions */}
         <View style={styles.row}>
           <View style={styles.btn}><Button title="Add player 'you'" onPress={onAddPlayer} /></View>
           <View style={styles.btn}><Button title="Add bot" onPress={onAddBot} /></View>
@@ -213,6 +223,27 @@ export default function App() {
           <View style={styles.btn}><Button title="Next turn" onPress={onNextTurn} /></View>
         </View>
 
+        {/* Bidding controls (only useful during Bidding) */}
+        <View style={styles.box}>
+          <Text style={styles.h2}>Bidding</Text>
+          <Text>It is {String(state?.turn)}'s bid. Max = {currentHandSize()}</Text>
+          <View style={styles.row}>
+            <View style={styles.btn}><Button title="Bid 0" onPress={() => onBid(0)} /></View>
+            <View style={styles.btn}><Button title="Bid 1" onPress={() => onBid(1)} /></View>
+            <View style={styles.btn}><Button title={`Bid ${currentHandSize()}`} onPress={() => onBid(currentHandSize())} /></View>
+          </View>
+
+          <Text style={{ marginTop: 8 }}>Trump:</Text>
+          <View style={styles.row}>
+            <View style={styles.btn}><Button title="NT" onPress={() => setTrump("NT")} /></View>
+            <View style={styles.btn}><Button title="♠" onPress={() => setTrump("♠")} /></View>
+            <View style={styles.btn}><Button title="♥" onPress={() => setTrump("♥")} /></View>
+            <View style={styles.btn}><Button title="♦" onPress={() => setTrump("♦")} /></View>
+            <View style={styles.btn}><Button title="♣" onPress={() => setTrump("♣")} /></View>
+          </View>
+        </View>
+
+        {/* Trick actions */}
         <View style={styles.row}>
           <View style={styles.btn}><Button title="Play first legal" onPress={playFirstLegal} /></View>
           <View style={styles.btn}><Button title="Tick (-1s)" onPress={onTick} /></View>
@@ -243,6 +274,6 @@ const styles = StyleSheet.create({
   boxError: { backgroundColor: "#fff3f3", borderWidth: 1, borderColor: "#f1c0c0", padding: 12, borderRadius: 8, marginBottom: 12 },
   h2: { fontSize: 16, fontWeight: "600", marginBottom: 6 },
   code: { fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }) as any, fontSize: 12, color: "#333" },
-  row: { flexDirection: "row", justifyContent: "space-between", gap: 12, marginBottom: 12 },
-  btn: { flex: 1 },
+  row: { flexDirection: "row", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" },
+  btn: { flexGrow: 1, minWidth: 120, marginBottom: 8 },
 });
