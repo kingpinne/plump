@@ -1,5 +1,6 @@
 // packages/game-core/src/protocol.ts
 import { z } from "zod";
+import type { Card } from "./cards";
 
 /** Protocol versioning to allow future rule changes without breaking clients */
 export const Protocol = {
@@ -36,3 +37,21 @@ export const EventSchema = z.discriminatedUnion("type", [
 
 export type Command = z.infer<typeof CommandSchema>;
 export type Event = z.infer<typeof EventSchema>;
+export type TrickPlay = { playerId: string; card: Card };
+
+export type GameState = {
+  version: number;
+  phase: Phase;
+  players: { id: string }[];
+  turn: string | null;
+  rngSeed: string;
+  turnSeconds: number;
+  timer: number | null;
+  handSizes: number[];
+
+ // NEW:
+ deck?: Card[];
+ hands?: Record<string, Card[]>;
+ trick?: { leader: string; plays: TrickPlay[] }; // current trick
+ tableWins?: Record<string, number>;             // tricks won per player (round scoring)
+};

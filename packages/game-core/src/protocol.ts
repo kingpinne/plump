@@ -1,24 +1,31 @@
-// packages/game-core/src/protocol.ts
-export type Command = { type: string; payload?: unknown };
-export type Event = { type: string; payload?: unknown };
+// --- Game flow phases ---
+export type Phase = "Lobby" | "Dealing" | "Trick" | "Scoring" | "RoundEnd";
 
-export type CommandSchema = unknown;
-export type EventSchema = unknown;
+// --- Commands sent from clients/UI ---
+export type Command =
+  | { type: "ADD_PLAYER"; playerId: string }
+  | { type: "START_GAME"; handSizes: number[]; turnSeconds: number }
+  | { type: "PLAY_CARD"; playerId: string; card: string }
+  | { type: "TICK" }
+  | { type: "NEXT_TURN" };
 
-export interface Protocol {
-  name: string;
-  version: string;
-  commands?: Record<string, CommandSchema>;
-  events?: Record<string, EventSchema>;
-}
+// --- Events (optional: if you later implement event sourcing) ---
+export type Event =
+  | { type: "PLAYER_ADDED"; playerId: string }
+  | { type: "GAME_STARTED" }
+  | { type: "CARD_PLAYED"; playerId: string; card: string }
+  | { type: "TURN_TIMEOUT"; playerId: string };
 
-// 👇 Viktigt: exportera en VÄRDE-variabel som kan användas av koden
-export const protocol: Protocol = {
-  name: "plump",
-  version: "0.1.0",
-  commands: {},
-  events: {},
+// --- Shared types ---
+export type Player = { id: string };
+
+export type GameState = {
+  version: number;
+  phase: Phase;
+  players: Player[];
+  turn: string | null;
+  rngSeed: string;
+  turnSeconds: number;
+  timer: number | null;
+  handSizes: number[];
 };
-
-// (valfritt) default-export om någon importerar default
-export default protocol;
