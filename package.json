@@ -1,5 +1,8 @@
 {
   "name": "plump",
   "private": true,
-  "workspaces": ["apps/*", "packages/*"]
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "ios": "npm run ios -w apps/mobile"
+  }
 }
