@@ -1,6 +1,8 @@
 // packages/game-core/src/engine.ts
-import type { GameState, Command, Trump, ScoringConfig } from "./protocol";
+import type { GameState, Command, Trump, ScoringConfig, Player } from "./protocol";
 import { fullDeck, shuffle, suitOf, rankIndex, type Card } from "./cards";
+
+const MAX_PLAYERS = 7;
 
 // ---- Helpers ---------------------------------------------------------------
 
@@ -140,7 +142,7 @@ function placeBid(state: GameState, playerId: string, bid: number): GameState {
       phase: "Trick",
       trick: undefined,
       timer: state.turnSeconds,
-      turn: leaderId ?? state.turn,
+      turn: state.players[state.leadIndex]?.id ?? state.turn,
     };
   }
 
@@ -218,9 +220,7 @@ function scoreHand(state: GameState): Record<string, number> {
     } else {
       if (cfg.missMode === "wins") {
         scores[pid] = (scores[pid] ?? 0) + tricks;
-      } else { // "zero"
-        // no points
-      }
+      } // else "zero" → no points
     }
   }
   return scores;
@@ -230,9 +230,11 @@ function scoreHand(state: GameState): Record<string, number> {
 export function step(state: GameState, cmd: Command): GameState {
   switch (cmd.type) {
     case "ADD_PLAYER": {
+      if (state.players.length >= MAX_PLAYERS) return state;
       if (state.phase !== "Lobby") return state;
       if (state.players.some(p => p.id === cmd.playerId)) return state;
-      return { ...state, players: [...state.players, { id: cmd.playerId }] };
+      const newPlayer: Player = { id: cmd.playerId, kind: cmd.kind ?? "human" };
+      return { ...state, players: [...state.players, newPlayer] };
     }
 
     case "START_GAME": {

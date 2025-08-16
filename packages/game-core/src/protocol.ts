@@ -5,7 +5,8 @@ import type { Card, Suit } from "./cards";
 export type Phase = "Lobby" | "Bidding" | "Trick" | "Scoring" | "RoundEnd";
 
 // --- Core entities ---
-export type Player = { id: string };
+export type PlayerKind = "human" | "bot";
+export type Player = { id: string; kind: PlayerKind };
 
 export type TrickPlay = {
   playerId: string;
@@ -24,7 +25,7 @@ export type ScoringConfig = {
 
 // --- Commands (from UI/clients) ---
 export type Command =
-  | { type: "ADD_PLAYER"; playerId: string }
+  | { type: "ADD_PLAYER"; playerId: string; kind?: PlayerKind } // kind defaults to "human"
   | { type: "START_GAME"; handSizes: number[]; turnSeconds: number; scoring?: Partial<ScoringConfig> }
   | { type: "PLACE_BID"; playerId: string; bid: number }
   | { type: "SET_TRUMP"; trump: Trump }

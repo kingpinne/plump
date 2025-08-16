@@ -1,5 +1,5 @@
 // apps/mobile/App.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   SafeAreaView,
   View,
@@ -16,11 +16,12 @@ import {
   applyCommand as coreApplyCommand,
 } from "../../packages/game-core/src/reducer";
 
-// --- Types kept loose so this file stays ergonomic while core evolves ---
+// --- Types, intentionally loose for app ergonomics ---
+type Player = { id: string; kind?: "human" | "bot" };
 type CoreGameState = {
   version: number;
   phase?: "Lobby" | "Bidding" | "Trick" | "Scoring" | "RoundEnd";
-  players: { id: string }[];
+  players: Player[];
   turn: string | null;
   rngSeed?: string;
   turnSeconds?: number;
@@ -30,7 +31,7 @@ type CoreGameState = {
   leadIndex?: number;
   scores?: Record<string, number>;
   bids?: Record<string, number | undefined>;
-  trump?: string; // "NT" | "♠" | "♥" | "♦" | "♣"
+  trump?: "NT" | "♠" | "♥" | "♦" | "♣";
   scoring?: { exactBonus: number; missMode: "zero" | "wins" };
   deck?: string[];
   hands?: Record<string, string[]>;
@@ -46,25 +47,25 @@ function normalizeState<T extends object>(maybe: any): T {
   }
   throw new Error("initialState() returned undefined/null");
 }
+const RANKS = ["A","K","Q","J","10","9","8","7","6","5","4","3","2"];
+const rankIndex = (card: string) => RANKS.indexOf(card.slice(0, card.length - 1));
+const suitOf = (card: string) => card.slice(-1);
+const sumBids = (b: Record<string, number | undefined> | undefined) =>
+  Object.values(b ?? {}).reduce((a, v) => a + (typeof v === "number" ? v : 0), 0);
 
-function sumBids(bids: Record<string, number | undefined> | undefined) {
-  if (!bids) return 0;
-  return Object.values(bids).reduce((a, v) => a + (typeof v === "number" ? v : 0), 0);
-}
-
-function nextAfter(id: string, players: { id: string }[]) {
-  const idx = Math.max(0, players.findIndex((p) => p.id === id));
+const nextAfter = (id: string, players: Player[]) => {
+  const idx = Math.max(0, players.findIndex(p => p.id === id));
   return players[(idx + 1) % players.length]?.id;
-}
+};
 
-function currentHandSize(state: CoreGameState | null) {
+const currentHandSize = (state: CoreGameState | null) => {
   if (!state?.handSizes) return 0;
   const idx = state.roundIndex ?? 0;
   return state.handSizes[idx] ?? 0;
-}
+};
 
 // --- Small UI primitives ----------------------------------------------------
-function Chip(props: { label: string; onPress?: () => void; active?: boolean; danger?: boolean }) {
+function Chip(props: { label: string; onPress?: () => void; active?: boolean }) {
   return (
     <Pressable
       onPress={props.onPress}
@@ -72,7 +73,6 @@ function Chip(props: { label: string; onPress?: () => void; active?: boolean; da
       style={[
         styles.chip,
         props.active && styles.chipActive,
-        props.danger && styles.chipDanger,
         !props.onPress && styles.chipDisabled,
       ]}
     >
@@ -97,26 +97,20 @@ function Section(props: { title: string; defaultOpen?: boolean; children: React.
 // --- App --------------------------------------------------------------------
 export default function App() {
   const [state, setState] = useState<CoreGameState | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [autoTick, setAutoTick] = useState(true);
+  const [botsOn, setBotsOn] = useState(true);
+  const botTimer = useRef<any>(null);
 
   const initialState = useMemo(() => coreInitialState, []);
   const applyCommand = useMemo(() => coreApplyCommand, []);
 
   const boot = () => {
-    try {
-      const raw = initialState?.("seed-123");
-      const s = normalizeState<CoreGameState>(raw);
-      setState(s);
-      setError(null);
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
-    }
+    const raw = initialState?.("seed-123");
+    const s = normalizeState<CoreGameState>(raw);
+    setState(s);
   };
 
-  useEffect(() => {
-    boot();
-  }, []);
+  useEffect(() => { boot(); }, []);
 
   // Auto-tick during Trick
   useEffect(() => {
@@ -136,9 +130,35 @@ export default function App() {
     setState(next);
   };
 
-  // Handlers
-  const onAddPlayer = () => run({ type: "ADD_PLAYER", playerId: "you" });
-  const onAddBot = () => run({ type: "ADD_PLAYER", playerId: "bot" });
+  // --- Player management ----------------------------------------------------
+  const nextBotId = () => {
+    for (let i = 1; i <= 7; i++) {
+      const id = `bot${i}`;
+      if (!state?.players?.some(p => p.id === id)) return id;
+    }
+    return `bot${Math.floor(1000 + Math.random()*9000)}`;
+  };
+  const nextHumanId = () => {
+    for (let i = 2; i <= 7; i++) {
+      const id = `p${i}`;
+      if (!state?.players?.some(p => p.id === id)) return id;
+    }
+    return `p${Math.floor(1000 + Math.random()*9000)}`;
+  };
+
+  const addBot = () => {
+    if (!state) return;
+    if ((state.players?.length ?? 0) >= 7) return;
+    run({ type: "ADD_PLAYER", playerId: nextBotId(), kind: "bot" });
+  };
+  const addThreeBots = () => { addBot(); addBot(); addBot(); };
+  const addHuman = () => {
+    if (!state) return;
+    if ((state.players?.length ?? 0) >= 7) return;
+    run({ type: "ADD_PLAYER", playerId: nextHumanId(), kind: "human" });
+  };
+
+  // --- Game controls --------------------------------------------------------
   const onStartGame = () =>
     run({
       type: "START_GAME",
@@ -148,159 +168,199 @@ export default function App() {
     });
   const onNextTurn = () => run({ type: "NEXT_TURN" });
   const onNextHand = () => run({ type: "NEXT_HAND" });
-  const onTick = () => run({ type: "TICK" });
-
   const onBid = (amount: number) => {
     if (!state || !state.turn) return;
     run({ type: "PLACE_BID", playerId: state.turn, bid: amount });
   };
   const setTrumpCmd = (t: string) => run({ type: "SET_TRUMP", trump: t });
-
-  const playCard = (card: string) => {
+  const playCardCmd = (card: string) => {
     if (!state || !state.turn) return;
     run({ type: "PLAY_CARD", playerId: state.turn, card });
   };
 
-  // Derived UI info
+  // --- Bot logic (UI-side orchestrator) ------------------------------------
+  // Simple bid estimate: A=1, K=0.6, Q=0.3 (+0.4 each for trump-suit cards if trump set)
+  const estimateBid = (hand: string[], trump: CoreGameState["trump"]) => {
+    let score = 0;
+    for (const c of hand) {
+      const r = c.slice(0, c.length - 1);
+      if (r === "A") score += 1;
+      else if (r === "K") score += 0.6;
+      else if (r === "Q") score += 0.3;
+      if (trump && trump !== "NT" && suitOf(c) === trump) score += 0.4;
+    }
+    const n = hand.length;
+    let bid = Math.max(0, Math.min(n, Math.round(score)));
+    return bid;
+  };
+
+  const legalCards = (hand: string[], trick: CoreGameState["trick"]) => {
+    if (!trick || !trick.plays.length) return hand.slice();
+    const lead = suitOf(trick.plays[0].card);
+    const follow = hand.filter(c => suitOf(c) === lead);
+    return follow.length ? follow : hand.slice();
+  };
+  const chooseBotCard = (hand: string[], trick: CoreGameState["trick"]) => {
+    const legals = legalCards(hand, trick);
+    // lowest by rank (use our RANKS index; larger index = lower rank)
+    let worst = legals[0];
+    for (let i = 1; i < legals.length; i++) {
+      if (rankIndex(legals[i]) > rankIndex(worst)) worst = legals[i];
+    }
+    return worst;
+  };
+
+  // Trigger bot actions automatically (short delay to keep UI readable)
+  useEffect(() => {
+    if (!state || !botsOn) return;
+    if (!state.turn) return;
+    const actor = state.players.find(p => p.id === state.turn);
+    if (!actor || actor.kind !== "bot") return;
+
+    clearTimeout(botTimer.current);
+    botTimer.current = setTimeout(() => {
+      if (!state || state.turn !== actor.id) return; // state changed
+      if (state.phase === "Bidding") {
+        const hand = state.hands?.[actor.id] ?? [];
+        const max = currentHandSize(state);
+        const total = sumBids(state.bids);
+        // naive estimate
+        let bid = estimateBid(hand, state.trump);
+        // avoid forbidden sum if last bidder
+        const leaderId = state.players[state.leadIndex ?? 0]?.id;
+        const lastBidder = leaderId && nextAfter(actor.id, state.players) === leaderId;
+        if (lastBidder && total + bid === max) {
+          if (bid > 0) bid -= 1; else if (bid < max) bid += 1;
+        }
+        run({ type: "PLACE_BID", playerId: actor.id, bid });
+      } else if (state.phase === "Trick") {
+        const hand = state.hands?.[actor.id] ?? [];
+        if (hand.length === 0) return;
+        const card = chooseBotCard(hand, state.trick);
+        run({ type: "PLAY_CARD", playerId: actor.id, card });
+      }
+    }, 300);
+    return () => clearTimeout(botTimer.current);
+  }, [state?.phase, state?.turn, state?.hands, state?.bids, botsOn]);
+
+  // --- Derived UI info ------------------------------------------------------
   const handN = currentHandSize(state);
   const leaderId = state?.players?.[state?.leadIndex ?? 0]?.id;
   const isBidding = state?.phase === "Bidding";
   const isLastBidder = isBidding && state?.turn && leaderId && nextAfter(state.turn, state.players) === leaderId;
   const forbidden = isLastBidder ? handN - sumBids(state?.bids) : null;
-
   const yourHand = state?.turn ? state?.hands?.[state.turn] ?? [] : [];
   const biddingRange = Array.from({ length: handN + 1 }, (_, i) => i).filter(
     (n) => !(forbidden != null && n === forbidden)
   );
 
+  // --- Render ----------------------------------------------------------------
   return (
     <SafeAreaView style={styles.safe}>
-      <View style={styles.header}>
-        <Text style={styles.h1}>Plump (Dev)</Text>
-      </View>
+      <View style={styles.header}><Text style={styles.h1}>Plump (Dev)</Text></View>
 
       <ScrollView contentContainerStyle={styles.body}>
-        {/* Error */}
-        {error && (
-          <Section title="Startup error" defaultOpen>
-            <Text style={styles.code}>{error}</Text>
-            <View style={styles.row}><Chip label="Retry boot" onPress={boot} /></View>
-          </Section>
-        )}
-
-        {/* Summary bar */}
+        {/* Summary */}
         <View style={styles.cardRow}>
           <Chip label={`Phase: ${state?.phase ?? "—"}`} />
           <Chip label={`Turn: ${state?.turn ?? "—"}`} />
           <Chip label={`Timer: ${state?.timer ?? "—"}`} />
         </View>
         <View style={styles.cardRow}>
+          <Chip label={`Players: ${state?.players?.length ?? 0}/7`} />
           <Chip label={`Hand: ${handN}`} />
           <Chip label={`Trump: ${state?.trump ?? "NT"}`} />
-          <View style={styles.switchRow}>
-            <Text>Auto tick</Text>
-            <Switch value={autoTick} onValueChange={setAutoTick} />
-          </View>
+        </View>
+        <View style={styles.cardRow}>
+          <View style={styles.switchRow}><Text>Auto tick</Text><Switch value={autoTick} onValueChange={setAutoTick} /></View>
+          <View style={styles.switchRow}><Text>Bots auto</Text><Switch value={botsOn} onValueChange={setBotsOn} /></View>
         </View>
 
-        {/* Phase-aware controls */}
+        {/* Lobby controls */}
         {state?.phase === "Lobby" && (
           <View style={styles.cardRow}>
-            <Chip label="Add player 'you'" onPress={onAddPlayer} />
-            <Chip label="Add bot" onPress={onAddBot} />
+            <Chip label="Add human" onPress={addHuman} />
+            <Chip label="Add bot" onPress={addBot} />
+            <Chip label="Add +3 bots" onPress={addThreeBots} />
             <Chip label="Start game" onPress={onStartGame} active />
           </View>
         )}
 
+        {/* Bidding */}
         {state?.phase === "Bidding" && (
-          <>
-            <Section title="Bidding" defaultOpen>
-              <Text style={{ marginBottom: 6 }}>
-                It’s <Text style={styles.bold}>{state?.turn}</Text> to bid. Max = {handN}
-              </Text>
-              {isLastBidder && (
-                <Text style={{ color: "#a00", marginBottom: 6 }}>Forbidden bid: {String(forbidden)}</Text>
-              )}
-              <View style={styles.cardRowWrap}>
-                {biddingRange.map((n) => (
-                  <Chip key={n} label={`Bid ${n}`} onPress={() => onBid(n)} />
-                ))}
-              </View>
+          <Section title="Bidding" defaultOpen>
+            <Text style={{ marginBottom: 6 }}>
+              It’s <Text style={styles.bold}>{state?.turn}</Text> to bid. Max = {handN}
+            </Text>
+            {isLastBidder && <Text style={{ color: "#a00", marginBottom: 6 }}>Forbidden: {String(forbidden)}</Text>}
+            <View style={styles.cardRowWrap}>
+              {biddingRange.map((n) => (
+                <Chip key={n} label={`Bid ${n}`} onPress={() => onBid(n)} />
+              ))}
+            </View>
 
-              <Text style={{ marginTop: 8, marginBottom: 6 }}>Trump:</Text>
-              <View style={styles.cardRowWrap}>
-                {["NT", "♠", "♥", "♦", "♣"].map((t) => (
-                  <Chip key={t} label={t} onPress={() => setTrumpCmd(t)} active={state?.trump === t} />
-                ))}
-              </View>
-            </Section>
-          </>
+            <Text style={{ marginTop: 8, marginBottom: 6 }}>Trump:</Text>
+            <View style={styles.cardRowWrap}>
+              {["NT", "♠", "♥", "♦", "♣"].map((t) => (
+                <Chip key={t} label={t} onPress={() => setTrumpCmd(t)} active={state?.trump === t} />
+              ))}
+            </View>
+          </Section>
         )}
 
+        {/* Trick play */}
         {state?.phase === "Trick" && (
-          <>
-            <Section title="Play" defaultOpen>
-              <Text style={{ marginBottom: 6 }}>
-                Your hand ({state?.turn ?? "—"}):
-              </Text>
-              <View style={styles.cardRowWrap}>
-                {yourHand.map((c) => (
-                  <Chip key={c} label={c} onPress={() => playCard(c)} />
-                ))}
-              </View>
-
-              {state?.trick && (
-                <>
-                  <Text style={{ marginTop: 10, marginBottom: 6 }}>Table:</Text>
-                  <View style={styles.cardRowWrap}>
-                    {state.trick.plays.map((pl, i) => (
-                      <Chip key={i} label={`${pl.playerId} → ${pl.card}`} />
-                    ))}
-                  </View>
-                </>
-              )}
-
-              <View style={[styles.cardRow, { marginTop: 10 }]}>
-                <Chip label="Tick (-1s)" onPress={onTick} />
-                <Chip label="Next turn" onPress={onNextTurn} />
-              </View>
-            </Section>
-          </>
+          <Section title="Play" defaultOpen>
+            <Text style={{ marginBottom: 6 }}>Current: {state?.turn}</Text>
+            <View style={styles.cardRowWrap}>
+              {yourHand.map((c) => (
+                <Chip key={c} label={c} onPress={() => playCardCmd(c)} />
+              ))}
+            </View>
+            <View style={[styles.cardRow, { marginTop: 8 }]}>
+              <Chip label="Next turn" onPress={onNextTurn} />
+            </View>
+            {state?.trick && (
+              <>
+                <Text style={{ marginTop: 10, marginBottom: 6 }}>Table:</Text>
+                <View style={styles.cardRowWrap}>
+                  {state.trick.plays.map((pl, i) => (
+                    <Chip key={i} label={`${pl.playerId} → ${pl.card}`} />
+                  ))}
+                </View>
+              </>
+            )}
+          </Section>
         )}
 
         {state?.phase === "Scoring" && (
-          <View style={styles.cardRow}>
-            <Chip label="Next hand" onPress={onNextHand} active />
-          </View>
+          <View style={styles.cardRow}><Chip label="Next hand" onPress={onNextHand} active /></View>
         )}
 
         {state?.phase === "RoundEnd" && (
-          <View style={styles.cardRow}>
-            <Chip label="New game" onPress={boot} active />
-          </View>
+          <View style={styles.cardRow}><Chip label="New game" onPress={boot} active /></View>
         )}
 
-        {/* Compact debug info (collapsible) */}
+        {/* Players list */}
         <Section title="Players" defaultOpen>
           <View style={styles.cardRowWrap}>
             {(state?.players ?? []).map((p) => (
-              <Chip key={p.id} label={p.id} active={p.id === state?.turn} />
+              <Chip key={p.id} label={`${p.kind === "bot" ? "🤖" : "🧑"} ${p.id}`} active={p.id === state?.turn} />
             ))}
           </View>
         </Section>
 
-        <Section title="Bids" defaultOpen={false}>
-          {state?.players?.map((p) => (
-            <Text key={p.id}>• {p.id}: {state?.bids?.[p.id] ?? "—"}</Text>
-          ))}
-        </Section>
-
+        {/* Debug info */}
         <Section title="Scores" defaultOpen={false}>
           {state?.players?.map((p) => (
             <Text key={p.id}>• {p.id}: {state?.scores?.[p.id] ?? 0}</Text>
           ))}
         </Section>
-
+        <Section title="Bids" defaultOpen={false}>
+          {state?.players?.map((p) => (
+            <Text key={p.id}>• {p.id}: {state?.bids?.[p.id] ?? "—"}</Text>
+          ))}
+        </Section>
         <Section title="Hands (all)" defaultOpen={false}>
           {state?.hands &&
             Object.entries(state.hands).map(([pid, cards]) => (
@@ -326,7 +386,6 @@ const styles = StyleSheet.create({
   h2: { fontSize: 16, fontWeight: "600" },
   bold: { fontWeight: "700" },
 
-  // Chips / compact buttons
   chip: {
     paddingVertical: 8,
     paddingHorizontal: 12,
@@ -338,14 +397,13 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   chipActive: { backgroundColor: "#1b72ff20", borderColor: "#1b72ff70" },
-  chipDanger: { backgroundColor: "#ffefef", borderColor: "#f1b1b1" },
   chipDisabled: { opacity: 0.6 },
   chipText: { fontSize: 14, color: "#222" },
   chipTextActive: { fontWeight: "700" },
 
   cardRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", marginBottom: 4 },
   cardRowWrap: { flexDirection: "row", flexWrap: "wrap" },
-  switchRow: { flexDirection: "row", alignItems: "center", gap: 8, marginLeft: 8 },
+  switchRow: { flexDirection: "row", alignItems: "center", gap: 8, marginRight: 12 },
 
   section: {
     backgroundColor: "#fafafa",
@@ -360,10 +418,4 @@ const styles = StyleSheet.create({
     alignItems: "baseline",
   },
   disclosure: { color: "#666" },
-
-  code: {
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }) as any,
-    fontSize: 12,
-    color: "#333",
-  },
 });
