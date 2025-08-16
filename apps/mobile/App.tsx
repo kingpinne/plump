@@ -4,11 +4,11 @@ import {
   SafeAreaView,
   View,
   Text,
-  Button,
   ScrollView,
   StyleSheet,
   Platform,
   Switch,
+  Pressable,
 } from "react-native";
 
 import {
@@ -16,9 +16,10 @@ import {
   applyCommand as coreApplyCommand,
 } from "../../packages/game-core/src/reducer";
 
+// --- Types kept loose so this file stays ergonomic while core evolves ---
 type CoreGameState = {
   version: number;
-  phase?: string;
+  phase?: "Lobby" | "Bidding" | "Trick" | "Scoring" | "RoundEnd";
   players: { id: string }[];
   turn: string | null;
   rngSeed?: string;
@@ -29,7 +30,7 @@ type CoreGameState = {
   leadIndex?: number;
   scores?: Record<string, number>;
   bids?: Record<string, number | undefined>;
-  trump?: string;
+  trump?: string; // "NT" | "♠" | "♥" | "♦" | "♣"
   scoring?: { exactBonus: number; missMode: "zero" | "wins" };
   deck?: string[];
   hands?: Record<string, string[]>;
@@ -37,6 +38,7 @@ type CoreGameState = {
   tableWins?: Record<string, number>;
 };
 
+// --- Helpers ----------------------------------------------------------------
 function normalizeState<T extends object>(maybe: any): T {
   if (maybe && typeof maybe === "object") {
     if ("state" in maybe && maybe.state) return maybe.state as T;
@@ -45,9 +47,56 @@ function normalizeState<T extends object>(maybe: any): T {
   throw new Error("initialState() returned undefined/null");
 }
 
+function sumBids(bids: Record<string, number | undefined> | undefined) {
+  if (!bids) return 0;
+  return Object.values(bids).reduce((a, v) => a + (typeof v === "number" ? v : 0), 0);
+}
+
+function nextAfter(id: string, players: { id: string }[]) {
+  const idx = Math.max(0, players.findIndex((p) => p.id === id));
+  return players[(idx + 1) % players.length]?.id;
+}
+
+function currentHandSize(state: CoreGameState | null) {
+  if (!state?.handSizes) return 0;
+  const idx = state.roundIndex ?? 0;
+  return state.handSizes[idx] ?? 0;
+}
+
+// --- Small UI primitives ----------------------------------------------------
+function Chip(props: { label: string; onPress?: () => void; active?: boolean; danger?: boolean }) {
+  return (
+    <Pressable
+      onPress={props.onPress}
+      disabled={!props.onPress}
+      style={[
+        styles.chip,
+        props.active && styles.chipActive,
+        props.danger && styles.chipDanger,
+        !props.onPress && styles.chipDisabled,
+      ]}
+    >
+      <Text style={[styles.chipText, props.active && styles.chipTextActive]}>{props.label}</Text>
+    </Pressable>
+  );
+}
+
+function Section(props: { title: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(!!props.defaultOpen);
+  return (
+    <View style={styles.section}>
+      <Pressable onPress={() => setOpen(!open)} style={styles.sectionHeader}>
+        <Text style={styles.h2}>{props.title}</Text>
+        <Text style={styles.disclosure}>{open ? "▾" : "▸"}</Text>
+      </Pressable>
+      {open && <View style={{ paddingTop: 6 }}>{props.children}</View>}
+    </View>
+  );
+}
+
+// --- App --------------------------------------------------------------------
 export default function App() {
   const [state, setState] = useState<CoreGameState | null>(null);
-  const [rawInit, setRawInit] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [autoTick, setAutoTick] = useState(true);
 
@@ -57,7 +106,6 @@ export default function App() {
   const boot = () => {
     try {
       const raw = initialState?.("seed-123");
-      setRawInit(raw);
       const s = normalizeState<CoreGameState>(raw);
       setState(s);
       setError(null);
@@ -66,7 +114,9 @@ export default function App() {
     }
   };
 
-  useEffect(() => { boot(); }, []);
+  useEffect(() => {
+    boot();
+  }, []);
 
   // Auto-tick during Trick
   useEffect(() => {
@@ -89,12 +139,13 @@ export default function App() {
   // Handlers
   const onAddPlayer = () => run({ type: "ADD_PLAYER", playerId: "you" });
   const onAddBot = () => run({ type: "ADD_PLAYER", playerId: "bot" });
-  const onStartGame = () => run({
-    type: "START_GAME",
-    handSizes: [5, 4, 3],
-    turnSeconds: 10,
-    scoring: { exactBonus: 10, missMode: "zero" }, // change to "wins" if you like
-  });
+  const onStartGame = () =>
+    run({
+      type: "START_GAME",
+      handSizes: [5, 4, 3],
+      turnSeconds: 10,
+      scoring: { exactBonus: 10, missMode: "zero" },
+    });
   const onNextTurn = () => run({ type: "NEXT_TURN" });
   const onNextHand = () => run({ type: "NEXT_HAND" });
   const onTick = () => run({ type: "TICK" });
@@ -103,48 +154,24 @@ export default function App() {
     if (!state || !state.turn) return;
     run({ type: "PLACE_BID", playerId: state.turn, bid: amount });
   };
-  const setTrump = (t: string) => run({ type: "SET_TRUMP", trump: t });
+  const setTrumpCmd = (t: string) => run({ type: "SET_TRUMP", trump: t });
 
-  const playFirstLegal = () => {
+  const playCard = (card: string) => {
     if (!state || !state.turn) return;
-    const hand = state.hands?.[state.turn];
-    if (!hand || hand.length === 0) return;
-
-    const trick = state.trick;
-    let card = hand[0];
-    if (trick?.plays?.length) {
-      const leadSuit = trick.plays[0].card.slice(-1);
-      const follow = hand.find(c => c.endsWith(leadSuit));
-      card = follow ?? card;
-    }
     run({ type: "PLAY_CARD", playerId: state.turn, card });
   };
 
-  const currentHandSize = () => {
-    if (!state?.handSizes) return 0;
-    const idx = state.roundIndex ?? 0;
-    return state.handSizes[idx] ?? 0;
-  };
-
-  // Helpers for UI hints
+  // Derived UI info
+  const handN = currentHandSize(state);
   const leaderId = state?.players?.[state?.leadIndex ?? 0]?.id;
   const isBidding = state?.phase === "Bidding";
-  const isLastBidder =
-    isBidding &&
-    state?.turn &&
-    leaderId &&
-    nextAfter(state.turn, state.players) === leaderId;
+  const isLastBidder = isBidding && state?.turn && leaderId && nextAfter(state.turn, state.players) === leaderId;
+  const forbidden = isLastBidder ? handN - sumBids(state?.bids) : null;
 
-  const totalPlaced = sumBids(state?.bids ?? {});
-  const forbidden = isLastBidder ? (currentHandSize() - totalPlaced) : null;
-
-  function sumBids(bids: Record<string, number | undefined>): number {
-    return Object.values(bids).reduce((acc, v) => acc + (typeof v === "number" ? v : 0), 0);
-  }
-  function nextAfter(id: string, players: { id: string }[]) {
-    const idx = Math.max(0, players.findIndex(p => p.id === id));
-    return players[(idx + 1) % players.length].id;
-  }
+  const yourHand = state?.turn ? state?.hands?.[state.turn] ?? [] : [];
+  const biddingRange = Array.from({ length: handN + 1 }, (_, i) => i).filter(
+    (n) => !(forbidden != null && n === forbidden)
+  );
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -152,163 +179,191 @@ export default function App() {
         <Text style={styles.h1}>Plump (Dev)</Text>
       </View>
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.body}>
+      <ScrollView contentContainerStyle={styles.body}>
+        {/* Error */}
         {error && (
-          <View style={styles.boxError}>
-            <Text style={styles.h2}>Startup error</Text>
+          <Section title="Startup error" defaultOpen>
             <Text style={styles.code}>{error}</Text>
-            <View style={styles.btn}><Button title="Retry boot" onPress={boot} /></View>
-          </View>
+            <View style={styles.row}><Chip label="Retry boot" onPress={boot} /></View>
+          </Section>
         )}
 
-        <View style={styles.box}>
-          <Text style={styles.h2}>Game State</Text>
-          {state ? (
-            <>
-              <Text>version: {String(state.version)}</Text>
-              <Text>phase: {String(state.phase ?? "—")}</Text>
-              <Text>roundIndex: {String(state.roundIndex)}</Text>
-              <Text>current hand size: {String(currentHandSize())}</Text>
-              <Text>leadIndex: {String(state.leadIndex)}</Text>
-              <Text>turn: {String(state.turn)}</Text>
-              <Text>timer: {String(state.timer)}</Text>
-              <Text>trump: {String(state.trump)}</Text>
-              <Text>scoring: exactBonus={state.scoring?.exactBonus} missMode={state.scoring?.missMode}</Text>
-
-              <Text style={{ marginTop: 6 }}>players ({state.players?.length ?? 0}):</Text>
-              {(state.players ?? []).map((p, i) => (
-                <Text key={i}>• {p.id}</Text>
-              ))}
-
-              {!!state.bids && (
-                <>
-                  <Text style={{ marginTop: 6 }}>bids:</Text>
-                  {state.players.map(p => (
-                    <Text key={p.id}>• {p.id}: {state.bids?.[p.id] ?? "—"}</Text>
-                  ))}
-                </>
-              )}
-
-              {state.scores && Object.keys(state.scores).length > 0 && (
-                <>
-                  <Text style={{ marginTop: 6 }}>scores (cumulative):</Text>
-                  {Object.entries(state.scores).map(([pid, n]) => (
-                    <Text key={pid}>• {pid}: {n}</Text>
-                  ))}
-                </>
-              )}
-
-              {state.tableWins && (
-                <>
-                  <Text style={{ marginTop: 6 }}>tableWins (this hand):</Text>
-                  {Object.entries(state.tableWins).map(([pid, n]) => (
-                    <Text key={pid}>• {pid}: {n}</Text>
-                  ))}
-                </>
-              )}
-
-              {state.trick && (
-                <>
-                  <Text style={{ marginTop: 6 }}>trick:</Text>
-                  <Text>leader: {state.trick.leader}</Text>
-                  <Text>plays:</Text>
-                  {state.trick.plays.map((pl, i) => (
-                    <Text key={i}>• {pl.playerId} → {pl.card}</Text>
-                  ))}
-                </>
-              )}
-
-              {state.hands && (
-                <>
-                  <Text style={{ marginTop: 6 }}>hands:</Text>
-                  {Object.entries(state.hands).map(([pid, cards]) => (
-                    <Text key={pid}>• {pid}: {cards.join(", ")}</Text>
-                  ))}
-                </>
-              )}
-            </>
-          ) : (
-            <Text>Initializing…</Text>
-          )}
+        {/* Summary bar */}
+        <View style={styles.cardRow}>
+          <Chip label={`Phase: ${state?.phase ?? "—"}`} />
+          <Chip label={`Turn: ${state?.turn ?? "—"}`} />
+          <Chip label={`Timer: ${state?.timer ?? "—"}`} />
         </View>
-
-        {/* Settings */}
-        <View style={styles.box}>
-          <Text style={styles.h2}>Settings</Text>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <View style={styles.cardRow}>
+          <Chip label={`Hand: ${handN}`} />
+          <Chip label={`Trump: ${state?.trump ?? "NT"}`} />
+          <View style={styles.switchRow}>
             <Text>Auto tick</Text>
             <Switch value={autoTick} onValueChange={setAutoTick} />
           </View>
         </View>
 
-        {/* Actions */}
-        <View style={styles.row}>
-          <View style={styles.btn}><Button title="Add player 'you'" onPress={onAddPlayer} /></View>
-          <View style={styles.btn}><Button title="Add bot" onPress={onAddBot} /></View>
-        </View>
-
-        <View style={styles.row}>
-          <View style={styles.btn}><Button title="Start Game" onPress={onStartGame} /></View>
-          <View style={styles.btn}><Button title="Next turn" onPress={onNextTurn} /></View>
-        </View>
-
-        {/* Bidding controls */}
-        <View style={styles.box}>
-          <Text style={styles.h2}>Bidding</Text>
-          <Text>It is {String(state?.turn)}'s bid. Max = {currentHandSize()}</Text>
-          {isLastBidder && (
-            <Text style={{ color: "#a00", marginBottom: 6 }}>
-              Forbidden for last bidder: {String(forbidden)}
-            </Text>
-          )}
-          <View style={styles.row}>
-            <View style={styles.btn}><Button title="Bid 0" onPress={() => onBid(0)} /></View>
-            <View style={styles.btn}><Button title="Bid 1" onPress={() => onBid(1)} /></View>
-            <View style={styles.btn}><Button title={`Bid ${currentHandSize()}`} onPress={() => onBid(currentHandSize())} /></View>
+        {/* Phase-aware controls */}
+        {state?.phase === "Lobby" && (
+          <View style={styles.cardRow}>
+            <Chip label="Add player 'you'" onPress={onAddPlayer} />
+            <Chip label="Add bot" onPress={onAddBot} />
+            <Chip label="Start game" onPress={onStartGame} active />
           </View>
+        )}
 
-          <Text style={{ marginTop: 8 }}>Trump:</Text>
-          <View style={styles.row}>
-            <View style={styles.btn}><Button title="NT" onPress={() => setTrump("NT")} /></View>
-            <View style={styles.btn}><Button title="♠" onPress={() => setTrump("♠")} /></View>
-            <View style={styles.btn}><Button title="♥" onPress={() => setTrump("♥")} /></View>
-            <View style={styles.btn}><Button title="♦" onPress={() => setTrump("♦")} /></View>
-            <View style={styles.btn}><Button title="♣" onPress={() => setTrump("♣")} /></View>
+        {state?.phase === "Bidding" && (
+          <>
+            <Section title="Bidding" defaultOpen>
+              <Text style={{ marginBottom: 6 }}>
+                It’s <Text style={styles.bold}>{state?.turn}</Text> to bid. Max = {handN}
+              </Text>
+              {isLastBidder && (
+                <Text style={{ color: "#a00", marginBottom: 6 }}>Forbidden bid: {String(forbidden)}</Text>
+              )}
+              <View style={styles.cardRowWrap}>
+                {biddingRange.map((n) => (
+                  <Chip key={n} label={`Bid ${n}`} onPress={() => onBid(n)} />
+                ))}
+              </View>
+
+              <Text style={{ marginTop: 8, marginBottom: 6 }}>Trump:</Text>
+              <View style={styles.cardRowWrap}>
+                {["NT", "♠", "♥", "♦", "♣"].map((t) => (
+                  <Chip key={t} label={t} onPress={() => setTrumpCmd(t)} active={state?.trump === t} />
+                ))}
+              </View>
+            </Section>
+          </>
+        )}
+
+        {state?.phase === "Trick" && (
+          <>
+            <Section title="Play" defaultOpen>
+              <Text style={{ marginBottom: 6 }}>
+                Your hand ({state?.turn ?? "—"}):
+              </Text>
+              <View style={styles.cardRowWrap}>
+                {yourHand.map((c) => (
+                  <Chip key={c} label={c} onPress={() => playCard(c)} />
+                ))}
+              </View>
+
+              {state?.trick && (
+                <>
+                  <Text style={{ marginTop: 10, marginBottom: 6 }}>Table:</Text>
+                  <View style={styles.cardRowWrap}>
+                    {state.trick.plays.map((pl, i) => (
+                      <Chip key={i} label={`${pl.playerId} → ${pl.card}`} />
+                    ))}
+                  </View>
+                </>
+              )}
+
+              <View style={[styles.cardRow, { marginTop: 10 }]}>
+                <Chip label="Tick (-1s)" onPress={onTick} />
+                <Chip label="Next turn" onPress={onNextTurn} />
+              </View>
+            </Section>
+          </>
+        )}
+
+        {state?.phase === "Scoring" && (
+          <View style={styles.cardRow}>
+            <Chip label="Next hand" onPress={onNextHand} active />
           </View>
-        </View>
+        )}
 
-        {/* Trick actions */}
-        <View style={styles.row}>
-          <View style={styles.btn}><Button title="Play first legal" onPress={playFirstLegal} /></View>
-          <View style={styles.btn}><Button title="Tick (-1s)" onPress={onTick} /></View>
-        </View>
+        {state?.phase === "RoundEnd" && (
+          <View style={styles.cardRow}>
+            <Chip label="New game" onPress={boot} active />
+          </View>
+        )}
 
-        <View style={styles.row}>
-          <View style={styles.btn}><Button title="Next hand (after Scoring)" onPress={onNextHand} /></View>
-          <View style={styles.btn}><Button title="New game" onPress={boot} /></View>
-        </View>
+        {/* Compact debug info (collapsible) */}
+        <Section title="Players" defaultOpen>
+          <View style={styles.cardRowWrap}>
+            {(state?.players ?? []).map((p) => (
+              <Chip key={p.id} label={p.id} active={p.id === state?.turn} />
+            ))}
+          </View>
+        </Section>
+
+        <Section title="Bids" defaultOpen={false}>
+          {state?.players?.map((p) => (
+            <Text key={p.id}>• {p.id}: {state?.bids?.[p.id] ?? "—"}</Text>
+          ))}
+        </Section>
+
+        <Section title="Scores" defaultOpen={false}>
+          {state?.players?.map((p) => (
+            <Text key={p.id}>• {p.id}: {state?.scores?.[p.id] ?? 0}</Text>
+          ))}
+        </Section>
+
+        <Section title="Hands (all)" defaultOpen={false}>
+          {state?.hands &&
+            Object.entries(state.hands).map(([pid, cards]) => (
+              <Text key={pid}>• {pid}: {cards.join(", ")}</Text>
+            ))}
+        </Section>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
+// --- Styles -----------------------------------------------------------------
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "white" },
-  header: { padding: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#ddd" },
+  header: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#ddd",
+  },
   h1: { fontSize: 20, fontWeight: "700", color: "black" },
-  scroll: { flex: 1 },
-  body: { padding: 16 },
-  box: {
-    backgroundColor: "#f6f6f6",
+  body: { padding: 12, gap: 12 },
+  h2: { fontSize: 16, fontWeight: "600" },
+  bold: { fontWeight: "700" },
+
+  // Chips / compact buttons
+  chip: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: "#f1f1f1",
+    borderRadius: 999,
     borderWidth: 1,
     borderColor: "#e1e1e1",
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 12
+    marginRight: 8,
+    marginBottom: 8,
   },
-  boxError: { backgroundColor: "#fff3f3", borderWidth: 1, borderColor: "#f1c0c0", padding: 12, borderRadius: 8, marginBottom: 12 },
-  h2: { fontSize: 16, fontWeight: "600", marginBottom: 6 },
-  code: { fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }) as any, fontSize: 12, color: "#333" },
-  row: { flexDirection: "row", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" },
-  btn: { flexGrow: 1, minWidth: 120, marginBottom: 8 },
+  chipActive: { backgroundColor: "#1b72ff20", borderColor: "#1b72ff70" },
+  chipDanger: { backgroundColor: "#ffefef", borderColor: "#f1b1b1" },
+  chipDisabled: { opacity: 0.6 },
+  chipText: { fontSize: 14, color: "#222" },
+  chipTextActive: { fontWeight: "700" },
+
+  cardRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", marginBottom: 4 },
+  cardRowWrap: { flexDirection: "row", flexWrap: "wrap" },
+  switchRow: { flexDirection: "row", alignItems: "center", gap: 8, marginLeft: 8 },
+
+  section: {
+    backgroundColor: "#fafafa",
+    borderWidth: 1,
+    borderColor: "#ececec",
+    borderRadius: 10,
+    padding: 10,
+  },
+  sectionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+  },
+  disclosure: { color: "#666" },
+
+  code: {
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }) as any,
+    fontSize: 12,
+    color: "#333",
+  },
 });
