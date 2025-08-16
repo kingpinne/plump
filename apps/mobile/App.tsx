@@ -6,7 +6,6 @@ import {
   Text,
   ScrollView,
   StyleSheet,
-  Platform,
   Switch,
   Pressable,
 } from "react-native";
@@ -99,7 +98,7 @@ export default function App() {
   const [state, setState] = useState<CoreGameState | null>(null);
   const [autoTick, setAutoTick] = useState(true);
   const [botsOn, setBotsOn] = useState(true);
-  const botTimer = useRef<any>(null);
+  const botTimer = useRef<any>(null); // <-- single declaration
 
   const initialState = useMemo(() => coreInitialState, []);
   const applyCommand = useMemo(() => coreApplyCommand, []);
@@ -204,7 +203,6 @@ export default function App() {
   };
 
   // Fire bot actions with a small delay so UI is readable
-  const botTimer = useRef<any>(null);
   useEffect(() => {
     if (!state || !botsOn) return;
     if (!state.turn) return;
