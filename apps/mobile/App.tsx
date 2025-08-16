@@ -30,6 +30,7 @@ type CoreGameState = {
   scores?: Record<string, number>;
   bids?: Record<string, number | undefined>;
   trump?: string;
+  scoring?: { exactBonus: number; missMode: "zero" | "wins" };
   deck?: string[];
   hands?: Record<string, string[]>;
   trick?: { leader: string; plays: { playerId: string; card: string }[] };
@@ -88,7 +89,12 @@ export default function App() {
   // Handlers
   const onAddPlayer = () => run({ type: "ADD_PLAYER", playerId: "you" });
   const onAddBot = () => run({ type: "ADD_PLAYER", playerId: "bot" });
-  const onStartGame = () => run({ type: "START_GAME", handSizes: [5, 4, 3], turnSeconds: 10 });
+  const onStartGame = () => run({
+    type: "START_GAME",
+    handSizes: [5, 4, 3],
+    turnSeconds: 10,
+    scoring: { exactBonus: 10, missMode: "zero" }, // change to "wins" if you like
+  });
   const onNextTurn = () => run({ type: "NEXT_TURN" });
   const onNextHand = () => run({ type: "NEXT_HAND" });
   const onTick = () => run({ type: "TICK" });
@@ -120,6 +126,26 @@ export default function App() {
     return state.handSizes[idx] ?? 0;
   };
 
+  // Helpers for UI hints
+  const leaderId = state?.players?.[state?.leadIndex ?? 0]?.id;
+  const isBidding = state?.phase === "Bidding";
+  const isLastBidder =
+    isBidding &&
+    state?.turn &&
+    leaderId &&
+    nextAfter(state.turn, state.players) === leaderId;
+
+  const totalPlaced = sumBids(state?.bids ?? {});
+  const forbidden = isLastBidder ? (currentHandSize() - totalPlaced) : null;
+
+  function sumBids(bids: Record<string, number | undefined>): number {
+    return Object.values(bids).reduce((acc, v) => acc + (typeof v === "number" ? v : 0), 0);
+  }
+  function nextAfter(id: string, players: { id: string }[]) {
+    const idx = Math.max(0, players.findIndex(p => p.id === id));
+    return players[(idx + 1) % players.length].id;
+  }
+
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
@@ -145,11 +171,14 @@ export default function App() {
               <Text>current hand size: {String(currentHandSize())}</Text>
               <Text>leadIndex: {String(state.leadIndex)}</Text>
               <Text>turn: {String(state.turn)}</Text>
-              {"rngSeed" in state && <Text>rngSeed: {String(state.rngSeed)}</Text>}
               <Text>timer: {String(state.timer)}</Text>
-              <Text>turnSeconds: {String(state.turnSeconds)}</Text>
-              <Text>handSizes: {String(state.handSizes ?? [])}</Text>
               <Text>trump: {String(state.trump)}</Text>
+              <Text>scoring: exactBonus={state.scoring?.exactBonus} missMode={state.scoring?.missMode}</Text>
+
+              <Text style={{ marginTop: 6 }}>players ({state.players?.length ?? 0}):</Text>
+              {(state.players ?? []).map((p, i) => (
+                <Text key={i}>• {p.id}</Text>
+              ))}
 
               {!!state.bids && (
                 <>
@@ -223,10 +252,15 @@ export default function App() {
           <View style={styles.btn}><Button title="Next turn" onPress={onNextTurn} /></View>
         </View>
 
-        {/* Bidding controls (only useful during Bidding) */}
+        {/* Bidding controls */}
         <View style={styles.box}>
           <Text style={styles.h2}>Bidding</Text>
           <Text>It is {String(state?.turn)}'s bid. Max = {currentHandSize()}</Text>
+          {isLastBidder && (
+            <Text style={{ color: "#a00", marginBottom: 6 }}>
+              Forbidden for last bidder: {String(forbidden)}
+            </Text>
+          )}
           <View style={styles.row}>
             <View style={styles.btn}><Button title="Bid 0" onPress={() => onBid(0)} /></View>
             <View style={styles.btn}><Button title="Bid 1" onPress={() => onBid(1)} /></View>
@@ -251,6 +285,7 @@ export default function App() {
 
         <View style={styles.row}>
           <View style={styles.btn}><Button title="Next hand (after Scoring)" onPress={onNextHand} /></View>
+          <View style={styles.btn}><Button title="New game" onPress={boot} /></View>
         </View>
       </ScrollView>
     </SafeAreaView>

@@ -1,5 +1,5 @@
 // packages/game-core/src/engine.ts
-import type { GameState, Command } from "./protocol";
+import type { GameState, Command, Trump, ScoringConfig } from "./protocol";
 import { fullDeck, shuffle, suitOf, rankIndex, type Card } from "./cards";
 
 // ---- Helpers ---------------------------------------------------------------
@@ -17,6 +17,10 @@ function rotateTurn(state: GameState): GameState {
   if (!state.turn || state.players.length === 0) return state;
   const next = nextAfter(state.turn, state.players);
   return { ...state, turn: next, timer: state.turnSeconds };
+}
+
+function sumBids(bids: Record<string, number | undefined>): number {
+  return Object.values(bids).reduce((acc, v) => acc + (typeof v === "number" ? v : 0), 0);
 }
 
 function deal(state: GameState): GameState {
@@ -42,9 +46,11 @@ function startHand(state: GameState): GameState {
   const leader = dealt.players[dealt.leadIndex]?.id ?? dealt.players[0]?.id ?? null;
   return {
     ...dealt,
-    phase: "Trick",
-    timer: dealt.turnSeconds,
+    phase: "Bidding",
+    timer: null,                   // no countdown in bidding (for now)
     turn: leader,
+    bids: Object.create(null),
+    trump: "NT",
   };
 }
 
@@ -57,10 +63,19 @@ function legalToPlay(state: GameState, playerId: string, card: Card): boolean {
   return !hasLead || suitOf(card) === leadSuit;
 }
 
-function pickTrickWinner(plays: { playerId: string; card: Card }[]): string {
+function pickTrickWinner(plays: { playerId: string; card: Card }[], trump: Trump): string {
+  if (trump !== "NT") {
+    const trumpPlays = plays.filter(p => suitOf(p.card) === trump);
+    if (trumpPlays.length) {
+      let best = trumpPlays[0];
+      for (let i = 1; i < trumpPlays.length; i++) {
+        if (rankIndex(trumpPlays[i].card) < rankIndex(best.card)) best = trumpPlays[i];
+      }
+      return best.playerId;
+    }
+  }
   const leadSuit = suitOf(plays[0].card);
   const leadPlays = plays.filter(p => suitOf(p.card) === leadSuit);
-  // Highest rank among lead suit; lower rankIndex() = higher rank because RANKS starts at A
   let best = leadPlays[0];
   for (let i = 1; i < leadPlays.length; i++) {
     if (rankIndex(leadPlays[i].card) < rankIndex(best.card)) best = leadPlays[i];
@@ -76,11 +91,9 @@ function chooseAutoCard(state: GameState, playerId: string): Card | null {
   const plays = state.trick?.plays ?? [];
   const leadSuit = plays.length ? suitOf(plays[0].card) : null;
 
-  // collect legal cards
   const legal = hand.filter(c => legalToPlay(state, playerId, c));
   if (legal.length === 0) return null;
 
-  // prefer following suit if possible, pick the *lowest* rank (largest index)
   const pool = leadSuit ? legal.filter(c => suitOf(c) === leadSuit) : legal;
   const list = pool.length ? pool : legal;
 
@@ -94,38 +107,73 @@ function chooseAutoCard(state: GameState, playerId: string): Card | null {
 function autoPlay(state: GameState): GameState {
   if (!state.turn) return state;
   const card = chooseAutoCard(state, state.turn);
-  if (!card) {
-    // should not happen; fallback to rotate
-    return rotateTurn(state);
-  }
+  if (!card) return rotateTurn(state);
   return playCard(state, state.turn, card);
 }
 
-// --- Core play --------------------------------------------------------------
+// --- Bidding (includes forbidden-sum rule) ----------------------------------
+function placeBid(state: GameState, playerId: string, bid: number): GameState {
+  if (state.phase !== "Bidding") return state;
+  if (state.turn !== playerId) return state;
+  const max = currentHandSize(state);
+  if (bid < 0 || bid > max) return state;
+
+  const leaderId = state.players[state.leadIndex]?.id ?? null;
+  const isLastBidder = leaderId != null && nextAfter(playerId, state.players) === leaderId;
+
+  const currentSum = sumBids(state.bids);
+  const proposedSum = currentSum + bid;
+
+  // Forbidden-sum: last bidder cannot make total equal to hand size.
+  if (isLastBidder && proposedSum === max) {
+    return state; // reject bid
+  }
+
+  const bids = { ...state.bids, [playerId]: bid };
+  const biddingDone = state.players.every(p => typeof bids[p.id] === "number");
+
+  if (biddingDone) {
+    // Move into Trick; leader keeps the lead for the first trick
+    return {
+      ...state,
+      bids,
+      phase: "Trick",
+      trick: undefined,
+      timer: state.turnSeconds,
+      turn: leaderId ?? state.turn,
+    };
+  }
+
+  // Next bidder
+  const next = nextAfter(playerId, state.players);
+  return { ...state, bids, turn: next };
+}
+
+function setTrump(state: GameState, trump: Trump): GameState {
+  if (state.phase !== "Bidding") return state;
+  return { ...state, trump };
+}
+
+// --- Trick play -------------------------------------------------------------
 function playCard(state: GameState, playerId: string, card: Card): GameState {
   if (state.phase !== "Trick" || !state.hands) return state;
   if (state.turn !== playerId) return state;
   if (!legalToPlay(state, playerId, card)) return state;
 
-  // remove from hand
   const hand = state.hands[playerId].slice();
   hand.splice(hand.indexOf(card), 1);
   const hands = { ...state.hands, [playerId]: hand };
 
-  // add to trick
   const trick = state.trick ?? { leader: playerId, plays: [] };
   const plays = trick.plays.concat({ playerId, card });
 
-  // if trick complete → score it
   if (plays.length === state.players.length) {
-    const winner = pickTrickWinner(plays);
+    const winner = pickTrickWinner(plays, state.trump);
     const tableWins = { ...(state.tableWins ?? {}) };
     tableWins[winner] = (tableWins[winner] ?? 0) + 1;
 
-    // any cards left in any hand?
     const anyLeft = Object.values(hands).some(h => h.length > 0);
     if (!anyLeft) {
-      // end of hand → go to Scoring
       return {
         ...state,
         hands,
@@ -137,7 +185,6 @@ function playCard(state: GameState, playerId: string, card: Card): GameState {
       };
     }
 
-    // winner leads next trick
     return {
       ...state,
       hands,
@@ -148,7 +195,6 @@ function playCard(state: GameState, playerId: string, card: Card): GameState {
     };
   }
 
-  // otherwise continue trick → next player
   const next = nextAfter(playerId, state.players);
   return {
     ...state,
@@ -159,8 +205,28 @@ function playCard(state: GameState, playerId: string, card: Card): GameState {
   };
 }
 
-// ---- Main reducer-style step ----------------------------------------------
+// ---- Scoring ---------------------------------------------------------------
+function scoreHand(state: GameState): Record<string, number> {
+  const scores = { ...state.scores };
+  const cfg = state.scoring;
+  for (const p of state.players) {
+    const pid = p.id;
+    const tricks = state.tableWins?.[pid] ?? 0;
+    const bid = state.bids?.[pid] ?? 0;
+    if (tricks === bid) {
+      scores[pid] = (scores[pid] ?? 0) + cfg.exactBonus + bid;
+    } else {
+      if (cfg.missMode === "wins") {
+        scores[pid] = (scores[pid] ?? 0) + tricks;
+      } else { // "zero"
+        // no points
+      }
+    }
+  }
+  return scores;
+}
 
+// ---- Main reducer-style step ----------------------------------------------
 export function step(state: GameState, cmd: Command): GameState {
   switch (cmd.type) {
     case "ADD_PLAYER": {
@@ -171,6 +237,11 @@ export function step(state: GameState, cmd: Command): GameState {
 
     case "START_GAME": {
       if (state.phase !== "Lobby" || state.players.length < 2) return state;
+      const defaults: ScoringConfig = { exactBonus: 10, missMode: "zero" };
+      const scoring: ScoringConfig = {
+        exactBonus: cmd.scoring?.exactBonus ?? defaults.exactBonus,
+        missMode: (cmd.scoring?.missMode ?? defaults.missMode),
+      };
       const seeded: GameState = {
         ...state,
         handSizes: cmd.handSizes,
@@ -178,8 +249,19 @@ export function step(state: GameState, cmd: Command): GameState {
         roundIndex: 0,
         leadIndex: 0,
         scores: Object.fromEntries(state.players.map(p => [p.id, 0])),
+        bids: {},
+        trump: "NT",
+        scoring,
       };
       return startHand(seeded);
+    }
+
+    case "PLACE_BID": {
+      return placeBid(state, cmd.playerId, cmd.bid);
+    }
+
+    case "SET_TRUMP": {
+      return setTrump(state, cmd.trump);
     }
 
     case "PLAY_CARD": {
@@ -190,8 +272,7 @@ export function step(state: GameState, cmd: Command): GameState {
       if (state.phase !== "Trick") return state;
       const t = (state.timer ?? 0) - 1;
       if (t > 0) return { ...state, timer: t };
-      // timer expired → auto-play for the current player
-      return autoPlay(state);
+      return autoPlay(state); // timer expired → auto-play
     }
 
     case "NEXT_TURN": {
@@ -201,15 +282,10 @@ export function step(state: GameState, cmd: Command): GameState {
     case "NEXT_HAND": {
       if (state.phase !== "Scoring") return state;
 
-      // add this hand's wins into cumulative scores
-      const scores = { ...state.scores };
-      for (const pid of Object.keys(state.tableWins ?? {})) {
-        scores[pid] = (scores[pid] ?? 0) + (state.tableWins?.[pid] ?? 0);
-      }
+      const scores = scoreHand(state);
 
       const nextRound = state.roundIndex + 1;
       if (nextRound >= state.handSizes.length) {
-        // all hands done
         return {
           ...state,
           scores,
@@ -218,16 +294,18 @@ export function step(state: GameState, cmd: Command): GameState {
           hands: undefined,
           trick: undefined,
           tableWins: undefined,
+          bids: {},
         };
       }
 
-      // advance hand: rotate leader, increment roundIndex, deal next
       const leadIndex = (state.leadIndex + 1) % state.players.length;
       const progressed: GameState = {
         ...state,
         scores,
         roundIndex: nextRound,
         leadIndex,
+        bids: {},
+        trump: "NT",
       };
       return startHand(progressed);
     }
