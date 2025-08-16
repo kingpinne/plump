@@ -26,6 +26,7 @@ export type ScoringConfig = {
 // --- Commands (from UI/clients) ---
 export type Command =
   | { type: "ADD_PLAYER"; playerId: string; kind?: PlayerKind } // kind defaults to "human"
+  | { type: "REMOVE_PLAYER"; playerId: string }                 // Lobby only
   | { type: "START_GAME"; handSizes: number[]; turnSeconds: number; scoring?: Partial<ScoringConfig> }
   | { type: "PLACE_BID"; playerId: string; bid: number }
   | { type: "SET_TRUMP"; trump: Trump }
@@ -45,7 +46,7 @@ export type GameState = {
   // timers/config
   turnSeconds: number;             // per-turn budget (seconds)
   timer: number | null;            // current countdown (seconds)
-  handSizes: number[];             // e.g. [5,4,3,2,1,2,3,4,5]
+  handSizes: number[];             // e.g. [1,2,3,4,5,4,3,2,1]
   scoring: ScoringConfig;
 
   // round progression

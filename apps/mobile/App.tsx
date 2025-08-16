@@ -65,22 +65,22 @@ const currentHandSize = (state: CoreGameState | null) => {
 };
 
 // --- Small UI primitives ----------------------------------------------------
-function Chip(props: { label: string; onPress?: () => void; active?: boolean }) {
+function Chip(props: { label: string; onPress?: () => void; active?: boolean; danger?: boolean; disabled?: boolean }) {
   return (
     <Pressable
       onPress={props.onPress}
-      disabled={!props.onPress}
+      disabled={!props.onPress || props.disabled}
       style={[
         styles.chip,
         props.active && styles.chipActive,
-        !props.onPress && styles.chipDisabled,
+        props.danger && styles.chipDanger,
+        (props.disabled || !props.onPress) && styles.chipDisabled,
       ]}
     >
       <Text style={[styles.chipText, props.active && styles.chipTextActive]}>{props.label}</Text>
     </Pressable>
   );
 }
-
 function Section(props: { title: string; defaultOpen?: boolean; children: React.ReactNode }) {
   const [open, setOpen] = useState(!!props.defaultOpen);
   return (
@@ -130,7 +130,11 @@ export default function App() {
     setState(next);
   };
 
-  // --- Player management ----------------------------------------------------
+  // --- Player management (single human) ------------------------------------
+  const hasHuman = !!state?.players?.some(p => p.kind === "human");
+  const seats = state?.players?.length ?? 0;
+  const capacity = 7;
+
   const nextBotId = () => {
     for (let i = 1; i <= 7; i++) {
       const id = `bot${i}`;
@@ -138,31 +142,23 @@ export default function App() {
     }
     return `bot${Math.floor(1000 + Math.random()*9000)}`;
   };
-  const nextHumanId = () => {
-    for (let i = 2; i <= 7; i++) {
-      const id = `p${i}`;
-      if (!state?.players?.some(p => p.id === id)) return id;
-    }
-    return `p${Math.floor(1000 + Math.random()*9000)}`;
-  };
 
+  const addYou = () => {
+    if (hasHuman || seats >= capacity) return;
+    run({ type: "ADD_PLAYER", playerId: "you", kind: "human" });
+  };
   const addBot = () => {
-    if (!state) return;
-    if ((state.players?.length ?? 0) >= 7) return;
+    if (seats >= capacity) return;
     run({ type: "ADD_PLAYER", playerId: nextBotId(), kind: "bot" });
   };
   const addThreeBots = () => { addBot(); addBot(); addBot(); };
-  const addHuman = () => {
-    if (!state) return;
-    if ((state.players?.length ?? 0) >= 7) return;
-    run({ type: "ADD_PLAYER", playerId: nextHumanId(), kind: "human" });
-  };
+  const removePlayer = (id: string) => run({ type: "REMOVE_PLAYER", playerId: id });
 
   // --- Game controls --------------------------------------------------------
   const onStartGame = () =>
     run({
       type: "START_GAME",
-      handSizes: [5, 4, 3],
+      handSizes: [1, 2, 3, 4, 5, 4, 3, 2, 1], // includes 1-card opener
       turnSeconds: 10,
       scoring: { exactBonus: 10, missMode: "zero" },
     });
@@ -178,8 +174,7 @@ export default function App() {
     run({ type: "PLAY_CARD", playerId: state.turn, card });
   };
 
-  // --- Bot logic (UI-side orchestrator) ------------------------------------
-  // Simple bid estimate: A=1, K=0.6, Q=0.3 (+0.4 each for trump-suit cards if trump set)
+  // --- Bot logic (UI-side helper; engine stays deterministic) ---------------
   const estimateBid = (hand: string[], trump: CoreGameState["trump"]) => {
     let score = 0;
     for (const c of hand) {
@@ -193,7 +188,6 @@ export default function App() {
     let bid = Math.max(0, Math.min(n, Math.round(score)));
     return bid;
   };
-
   const legalCards = (hand: string[], trick: CoreGameState["trick"]) => {
     if (!trick || !trick.plays.length) return hand.slice();
     const lead = suitOf(trick.plays[0].card);
@@ -202,7 +196,6 @@ export default function App() {
   };
   const chooseBotCard = (hand: string[], trick: CoreGameState["trick"]) => {
     const legals = legalCards(hand, trick);
-    // lowest by rank (use our RANKS index; larger index = lower rank)
     let worst = legals[0];
     for (let i = 1; i < legals.length; i++) {
       if (rankIndex(legals[i]) > rankIndex(worst)) worst = legals[i];
@@ -210,7 +203,8 @@ export default function App() {
     return worst;
   };
 
-  // Trigger bot actions automatically (short delay to keep UI readable)
+  // Fire bot actions with a small delay so UI is readable
+  const botTimer = useRef<any>(null);
   useEffect(() => {
     if (!state || !botsOn) return;
     if (!state.turn) return;
@@ -219,14 +213,12 @@ export default function App() {
 
     clearTimeout(botTimer.current);
     botTimer.current = setTimeout(() => {
-      if (!state || state.turn !== actor.id) return; // state changed
+      if (!state || state.turn !== actor.id) return;
       if (state.phase === "Bidding") {
         const hand = state.hands?.[actor.id] ?? [];
         const max = currentHandSize(state);
         const total = sumBids(state.bids);
-        // naive estimate
         let bid = estimateBid(hand, state.trump);
-        // avoid forbidden sum if last bidder
         const leaderId = state.players[state.leadIndex ?? 0]?.id;
         const lastBidder = leaderId && nextAfter(actor.id, state.players) === leaderId;
         if (lastBidder && total + bid === max) {
@@ -236,8 +228,7 @@ export default function App() {
       } else if (state.phase === "Trick") {
         const hand = state.hands?.[actor.id] ?? [];
         if (hand.length === 0) return;
-        const card = chooseBotCard(hand, state.trick);
-        run({ type: "PLAY_CARD", playerId: actor.id, card });
+        run({ type: "PLAY_CARD", playerId: actor.id, card: chooseBotCard(hand, state.trick) });
       }
     }, 300);
     return () => clearTimeout(botTimer.current);
@@ -257,7 +248,7 @@ export default function App() {
   // --- Render ----------------------------------------------------------------
   return (
     <SafeAreaView style={styles.safe}>
-      <View style={styles.header}><Text style={styles.h1}>Plump (Dev)</Text></View>
+      <View style={styles.header}><Text style={styles.h1}>Plump (Single Player Dev)</Text></View>
 
       <ScrollView contentContainerStyle={styles.body}>
         {/* Summary */}
@@ -276,14 +267,28 @@ export default function App() {
           <View style={styles.switchRow}><Text>Bots auto</Text><Switch value={botsOn} onValueChange={setBotsOn} /></View>
         </View>
 
-        {/* Lobby controls */}
+        {/* Lobby controls (single human + bots) */}
         {state?.phase === "Lobby" && (
-          <View style={styles.cardRow}>
-            <Chip label="Add human" onPress={addHuman} />
-            <Chip label="Add bot" onPress={addBot} />
-            <Chip label="Add +3 bots" onPress={addThreeBots} />
-            <Chip label="Start game" onPress={onStartGame} active />
-          </View>
+          <>
+            <View style={styles.cardRow}>
+              <Chip label="Add YOU" onPress={addYou} disabled={hasHuman} active={!hasHuman} />
+              <Chip label="Add bot" onPress={addBot} disabled={seats >= capacity} />
+              <Chip label="Add +3 bots" onPress={addThreeBots} disabled={seats >= capacity} />
+              <Chip label="Start game" onPress={onStartGame} active />
+            </View>
+            <Section title="Players" defaultOpen>
+              <View style={styles.cardRowWrap}>
+                {(state?.players ?? []).map((p) => (
+                  <View key={p.id} style={{ flexDirection: "row", alignItems: "center", marginRight: 8, marginBottom: 8 }}>
+                    <Chip label={`${p.kind === "bot" ? "🤖" : "🧑"} ${p.id}`} />
+                    <Pressable onPress={() => removePlayer(p.id)} style={styles.removeBtn}>
+                      <Text style={styles.removeBtnText}>✖</Text>
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            </Section>
+          </>
         )}
 
         {/* Bidding */}
@@ -341,15 +346,6 @@ export default function App() {
           <View style={styles.cardRow}><Chip label="New game" onPress={boot} active /></View>
         )}
 
-        {/* Players list */}
-        <Section title="Players" defaultOpen>
-          <View style={styles.cardRowWrap}>
-            {(state?.players ?? []).map((p) => (
-              <Chip key={p.id} label={`${p.kind === "bot" ? "🤖" : "🧑"} ${p.id}`} active={p.id === state?.turn} />
-            ))}
-          </View>
-        </Section>
-
         {/* Debug info */}
         <Section title="Scores" defaultOpen={false}>
           {state?.players?.map((p) => (
@@ -397,6 +393,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   chipActive: { backgroundColor: "#1b72ff20", borderColor: "#1b72ff70" },
+  chipDanger: { backgroundColor: "#ffefef", borderColor: "#f1b1b1" },
   chipDisabled: { opacity: 0.6 },
   chipText: { fontSize: 14, color: "#222" },
   chipTextActive: { fontWeight: "700" },
@@ -418,4 +415,15 @@ const styles = StyleSheet.create({
     alignItems: "baseline",
   },
   disclosure: { color: "#666" },
+
+  removeBtn: {
+    marginLeft: 4,
+    backgroundColor: "#ffecec",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#f3b7b7",
+  },
+  removeBtnText: { color: "#a00", fontWeight: "700" },
 });
